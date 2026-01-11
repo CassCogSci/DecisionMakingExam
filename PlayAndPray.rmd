@@ -1,0 +1,370 @@
+---
+title: "Decision Making FINAL"
+author: "Cassandra Rempel"
+date: "2025-12-30"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+#Setup
+suppressPackageStartupMessages({
+  library(readxl)
+  library(dplyr)
+  library(tidyr)
+  library(R2jags)
+  library(parallel)
+})
+
+set.seed(1983)
+
+MPD <- function(x) density(x)$x[which.max(density(x)$y)]
+zscore <- function(x) (x - mean(x, na.rm = TRUE)) / sd(x, na.rm = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+#   H1: Competitiveness -> lower initial belief (betaX_alpha < 0)
+#   H2: Competitiveness -> stronger belief updating (betaX_omega > 0)
+#   H3: Competitiveness -> flatter conditional preference slope (betaX_rho < 0)
+
+α (alpha) — initial expectation / baseline cooperation
+ω (omega) — learning rate (how fast beliefs update)
+ρ (rho) — conditional cooperation (how strongly behaviour matches the group)
+
+```{r cars}
+#Load data
+
+df <- read_excel("/Users/cassandrarempel/Desktop/Cognitive Science MSc/Decision Making/ExamData.xlsx")
+
+# Keep individual-level rows only and require r1Contr to drop observers/non-players
+df_ind_raw <- df %>%
+  filter(Group == 0) %>%
+  filter(!is.na(r1Contr))
+
+#Reconstruct GroupID 
+# Groups are separated by summary rows where Group == 1.
+df2 <- df %>%
+  mutate(
+    is_summary = Group == 1,
+    grp_index  = cumsum(lag(is_summary, default = FALSE)) + 1
+  )
+
+df_ind <- df2 %>%
+  filter(Group == 0) %>%
+  filter(!is.na(r1Contr)) %>%
+  mutate(GroupID = grp_index)
+
+# Sanity check: groups should have 4 players
+group_sizes <- df_ind %>% count(GroupID, name = "n_players")
+if (any(group_sizes$n_players != 4)) {
+  warning("Some reconstructed groups do not have 4 contributors (model assumes 4).")
+  print(group_sizes %>% filter(n_players != 4))
+}
+
+#Define core constants
+ntrials   <- 5
+groupSize <- 4
+
+#Map groups and set player order
+# Make each Condition*GroupID a unique group unit G
+group_map <- df_ind %>%
+  distinct(Condition, GroupID) %>%
+  arrange(Condition, GroupID) %>%
+  mutate(G = row_number())
+
+# Add G and a stable Player index (1..4) within each group
+df_ind <- df_ind %>%
+  left_join(group_map, by = c("Condition", "GroupID")) %>%
+  group_by(G) %>%
+  mutate(Player = row_number()) %>%
+  ungroup()
+
+ngroups <- max(df_ind$G, na.rm = TRUE)
+
+#Build long contributions
+# This avoids the earlier bug where Player was overwritten within each round.
+contr_long <- df_ind %>%
+  select(G, Player, Condition, GroupID,
+         Competitiveness,
+         r1Contr, r2Contr, r3Contr, r4Contr, r5Contr) %>%
+  pivot_longer(
+    cols = r1Contr:r5Contr,
+    names_to = "round",
+    values_to = "c"
+  ) %>%
+  mutate(t = as.integer(gsub("r|Contr", "", round))) %>%
+  arrange(G, Player, t)
+
+#Build arrays c and Gga 
+# c_arr[player, trial, group]
+c_arr <- array(NA_real_, dim = c(groupSize, ntrials, ngroups))
+
+for (g in 1:ngroups) {
+  tmp <- contr_long %>%
+    filter(G == g) %>%
+    arrange(Player, t)
+
+  # Expect exactly groupSize*ntrials rows per group
+  if (nrow(tmp) != groupSize * ntrials) {
+    warning(paste("Group", g, "has", nrow(tmp), "rows; expected", groupSize * ntrials))
+  }
+
+  mat <- matrix(tmp$c, nrow = groupSize, ncol = ntrials, byrow = TRUE)
+  c_arr[,,g] <- mat
+}
+
+# Gga[t,g] = group mean contribution at trial t (including self)
+Gga <- array(NA_real_, dim = c(ntrials, ngroups))
+for (g in 1:ngroups) {
+  Gga[,g] <- colMeans(c_arr[,,g], na.rm = TRUE)
+}
+
+# FORCE matrix dims (prevents “subset out of range” when shipped to clusters)
+Gga_mat <- matrix(Gga, nrow = ntrials, ncol = ngroups)
+stopifnot(all(dim(Gga_mat) == c(ntrials, ngroups)))
+stopifnot(all(dim(c_arr) == c(groupSize, ntrials, ngroups)))
+
+#Covariate X: group mean Competitiveness 
+Xg <- df_ind %>%
+  group_by(G) %>%
+  summarise(X = mean(Competitiveness, na.rm = TRUE), .groups = "drop") %>%
+  arrange(G) %>%
+  pull(X)
+
+X <- zscore(Xg)
+stopifnot(length(X) == ngroups)
+
+# Indicator to avoid if/== inside JAGS
+isFirst <- rep(0, ntrials)
+isFirst[1] <- 1
+
+#Empirical plots
+winnings     <- sapply(1:ngroups, function(g) sum(c_arr[,,g], na.rm = TRUE))
+initial_mean <- sapply(1:ngroups, function(g) mean(c_arr[,1,g], na.rm = TRUE))
+
+par(mfrow = c(1,3), mar = c(4,4,3,1))
+
+plot(Xg, winnings,
+     xlab = "Group mean Competitiveness",
+     ylab = "Total contributions (proxy)",
+     main = "Empirical: Competitiveness vs Total contributions")
+abline(lm(winnings ~ Xg), lty = 2)
+
+plot(Xg, initial_mean,
+     xlab = "Group mean Competitiveness",
+     ylab = "Mean Round-1 contribution",
+     main = "Empirical: Competitiveness vs Initial contribution")
+abline(lm(initial_mean ~ Xg), lty = 2)
+
+plot(Xg, winnings,
+     xlab = "Group mean Competitiveness",
+     ylab = "Total contributions",
+     main = "Empirical: repeat check")
+abline(lm(winnings ~ Xg), lty = 2)
+
+# JAGS conditional cooperation model
+# Key latent parameters per group:
+#   alpha[g] = initial belief/expectation (0..10)
+#   omega[g] = belief updating weight (0..1)
+#   rho[g]   = conditional cooperation slope (0..1)
+# Belief update:
+#   E[1,g] = alpha[g]
+#   E[t,g] = E[t-1,g] + omega[g]*(Gga[t-1,g] - E[t-1,g])
+#
+# Behaviour:
+#   mu[t,g] = alpha[g] (t=1)
+#   mu[t,g] = (1-rho)*E[t,g] + rho*Gga[t-1,g] (t>1)
+#
+# Avoids if/== entirely using isFirst[t] switch.
+
+jags_model_string <- "
+model {
+
+  tau_alpha <- pow(sigma_alpha, -2)
+  sigma_alpha ~ dunif(0, 10)
+
+  tau_om <- pow(sigma_om, -2)
+  sigma_om ~ dunif(0, 5)
+
+  tau_rho <- pow(sigma_rho, -2)
+  sigma_rho ~ dunif(0, 5)
+
+  tau_c <- pow(sigma_c, -2)
+  sigma_c ~ dunif(0, 10)
+
+  beta0_alpha ~ dnorm(0, 0.01)
+  betaX_alpha ~ dt(0, 1, 1)
+
+  beta0_omega ~ dnorm(0, 0.01)
+  betaX_omega ~ dt(0, 1, 1)
+
+  beta0_rho ~ dnorm(0, 0.01)
+  betaX_rho ~ dt(0, 1, 1)
+
+  for (g in 1:ngroups) {
+
+    # initial belief alpha in [0,20]
+    alpha[g] ~ dnorm(beta0_alpha + betaX_alpha * X[g], tau_alpha) T(0, 10)
+
+    # omega and rho via logistic transform to keep in (0,1)
+    omega_logit[g] ~ dnorm(beta0_omega + betaX_omega * X[g], tau_om)
+    omega[g] <- 1 / (1 + exp(-omega_logit[g]))
+
+    rho_logit[g] ~ dnorm(beta0_rho + betaX_rho * X[g], tau_rho)
+    rho[g] <- 1 / (1 + exp(-rho_logit[g]))
+
+    # belief trajectory
+    E[1,g] <- alpha[g]
+    for (t in 2:ntrials) {
+      E[t,g] <- E[t-1,g] + omega[g] * (Gga[t-1,g] - E[t-1,g])
+    }
+
+    # define mu2 safely at t=1 (ignored because isFirst[1]=1)
+    mu2[1,g] <- alpha[g]
+    for (t in 2:ntrials) {
+      mu2[t,g] <- (1 - rho[g]) * E[t,g] + rho[g] * Gga[t-1,g]
+    }
+
+    for (t in 1:ntrials) {
+      mu1[t,g] <- alpha[g]
+      mu[t,g]  <- isFirst[t] * mu1[t,g] + (1 - isFirst[t]) * mu2[t,g]
+
+      for (s in 1:groupSize) {
+        c[s,t,g] ~ dnorm(mu[t,g], tau_c) T(0, 10)
+      }
+    }
+  }
+}
+"
+
+model_file <- "CC_competitiveness.jags"
+writeLines(jags_model_string, con = model_file)
+
+#Fit model 
+data_jags <- list(
+  groupSize = groupSize,
+  ntrials   = ntrials,
+  ngroups   = ngroups,
+  c         = c_arr,
+  Gga       = Gga_mat,
+  X         = as.numeric(X),
+  isFirst   = isFirst
+)
+
+params <- c(
+  "beta0_alpha","betaX_alpha",
+  "beta0_omega","betaX_omega",
+  "beta0_rho","betaX_rho",
+  "sigma_alpha","sigma_om","sigma_rho","sigma_c"
+)
+
+fit <- jags.parallel(
+  data = data_jags,
+  parameters.to.save = params,
+  model.file = model_file,
+  n.chains = 3,
+  n.iter = 30000,
+  n.burnin = 10000,
+  n.thin = 5,
+  n.cluster = 3
+)
+
+print(fit)
+
+```
+```{r}
+par(
+  mfrow = c(1, 3),
+  mar   = c(5, 4, 3, 1),
+  oma   = c(0, 0, 5, 0)
+)
+
+pt_col   <- rgb(0.2, 0.4, 0.6, 0.6)
+line_col <- rgb(0.1, 0.3, 0.6, 1.0)
+
+## Panel A: Overall cooperation
+plot(
+  Xg, winnings,
+  pch = 16, col = pt_col,
+  xlab = "Group mean competitiveness",
+  ylab = "Total contributions (proxy)",
+  main = "A. Overall cooperation"
+)
+abline(lm(winnings ~ Xg), lwd = 2, lty = 2, col = line_col)
+
+## Panel B: Initial cooperation
+plot(
+  Xg, initial_mean,
+  pch = 16, col = pt_col,
+  xlab = "Group mean competitiveness",
+  ylab = "Mean round-1 contribution",
+  main = "B. Initial cooperation"
+)
+abline(lm(initial_mean ~ Xg), lwd = 2, lty = 2, col = line_col)
+
+## Panel C: Robustness check
+plot(
+  Xg, winnings,
+  pch = 16, col = pt_col,
+  xlab = "Group mean competitiveness",
+  ylab = "Total contributions",
+  main = "C. Robustness check"
+)
+abline(lm(winnings ~ Xg), lwd = 2, lty = 2, col = line_col)
+
+mtext(
+  "Empirical relationship between group competitiveness and cooperation",
+  side = 3, outer = TRUE,
+  line = 2, cex = 1.2, font = 2
+)
+
+```
+
+## Including Plots
+
+```{r pressure, echo=FALSE}
+#Posterior plots + hypothesis checks 
+sims <- fit$BUGSoutput$sims.list
+
+plot_posterior_effect <- function(x, main) {
+  d <- density(x)
+  plot(d, main = main, xlab = "Standardised effect of Competitiveness", ylab = "")
+  abline(v = 0, col = "grey70")
+  m  <- mean(x)
+  ci <- quantile(x, probs = c(0.025, 0.975))
+  points(m, 0, pch = 16, col = "red")
+  segments(ci[1], 0, ci[2], 0, col = "red", lwd = 3)
+}
+
+pdf("~/CC_exam_posteriors.pdf", width = 11, height = 4)
+
+par(mfrow = c(1,3), mar = c(4,4,3,1))
+plot_posterior_effect(sims$betaX_alpha, "H1: Competitiveness → Initial belief (betaX_alpha)")
+plot_posterior_effect(sims$betaX_omega, "H2: Competitiveness → Learning weight (betaX_omega)")
+plot_posterior_effect(sims$betaX_rho,   "H3: Competitiveness → CC slope (betaX_rho)")
+
+dev.off()
+
+
+summ_ci <- function(x) c(mean = mean(x), `2.5%` = quantile(x, 0.025), `97.5%` = quantile(x, 0.975))
+
+cat("\nPosterior summaries (mean, 95% CI):\n")
+print(rbind(
+  betaX_alpha = summ_ci(sims$betaX_alpha),
+  betaX_omega = summ_ci(sims$betaX_omega),
+  betaX_rho   = summ_ci(sims$betaX_rho)
+))
+
+cat("\nDirectional support (posterior mass):\n")
+cat("P(betaX_alpha < 0) =", mean(sims$betaX_alpha < 0), "\n")  # H1
+cat("P(betaX_omega > 0) =", mean(sims$betaX_omega > 0), "\n")  # H2
+cat("P(betaX_rho   < 0) =", mean(sims$betaX_rho   < 0), "\n")  # H3
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
