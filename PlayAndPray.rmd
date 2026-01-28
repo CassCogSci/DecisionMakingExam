@@ -209,7 +209,7 @@ model {
 
   for (g in 1:ngroups) {
 
-    # initial belief alpha in [0,20]
+    # initial belief alpha in [0,10]
     alpha[g] ~ dnorm(beta0_alpha + betaX_alpha * X[g], tau_alpha) T(0, 10)
 
     # omega and rho via logistic transform to keep in (0,1)
