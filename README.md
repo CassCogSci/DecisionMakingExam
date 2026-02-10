@@ -1,7 +1,8 @@
 # DecisionMakingExam
 ExamProjectCognitiveScience
 
-README — Decision Making FINAL (PlayAndPray)
+README - Decision Making FINAL (PlayAndPray)
+
 A small Bayesian lantern for a public-goods night: this project tests whether group competitiveness predicts how groups cooperate and learn across rounds in a repeated contribution task, using a conditional cooperation / belief-updating model in JAGS. 
 PlayAndPray
 What this analysis does
