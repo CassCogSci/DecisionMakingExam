@@ -86,7 +86,7 @@ P(betaX_alpha < 0) = 0.323
 P(betaX_omega > 0) = 0.443
 P(betaX_rho < 0) = 0.5695 
 
-Sceptical translation: the posteriors here look… unconvinced. Not a slam dunk for any hypothesis; H3 has the strongest directional mass, but it’s still hardly a marching band. 
+Sceptical translation: the posteriors here look… unconvinced. H3 has the strongest support, but nothing significant. 
 
 How to run
 Option A — Knit the R Markdown
