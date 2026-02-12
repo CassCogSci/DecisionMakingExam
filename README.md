@@ -46,9 +46,9 @@ Create a stable Player index (1..4) within each group to avoid player-overwritin
 
 Derived variables
 Gga[t,g]: group mean contribution at trial t (including self). 
-PlayAndPray
+
 Xg: group mean Competitiveness, then standardised (X <- zscore(Xg)). 
-PlayAndPray
+
 A small switch vector isFirst avoids if(t==1) logic inside JAGS. 
 
 Empirical sanity plots
